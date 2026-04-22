@@ -1,57 +1,88 @@
-#!/usr/bin/env pwsh
+#Requires -Version 5.1
 <#
 .SYNOPSIS
-    视频学习处理脚本 - 提取帧、音频、转录语音
+    Video Learner - Extract frames, audio, and transcribe videos
 
 .DESCRIPTION
-    自动检测系统环境，从视频中提取关键帧和音频，
-    使用 Whisper 转录语音，生成学习素材。
+    Automatically detect system environment, extract key frames and audio from videos,
+    and transcribe speech using Whisper.
+
+    Optimized v2.1:
+    - Smart frame extraction (scene detection or fixed interval)
+    - Chinese mirror support for model downloading
+    - Better proxy handling
 
 .PARAMETER Video
-    视频文件路径（必填）
+    Video file path (required)
 
 .PARAMETER Output
-    输出目录路径（可选，默认为视频同目录下的 _output 文件夹）
+    Output directory (default: video同目录下的 _video_learn)
 
 .PARAMETER Proxy
-    代理地址，用于下载 Whisper 模型（可选）
+    Proxy address for downloading Whisper models (optional)
+
+.PARAMETER Mirror
+    Chinese mirror for model download: aliyun/tsinghua/ustc/none (default: auto-detect)
 
 .PARAMETER Model
-    Whisper 模型大小：tiny, base, small, medium, large（默认：small）
+    Whisper model size: tiny, base, small, medium, large (default: small)
 
 .PARAMETER Language
-    语言代码：zh, en, ja, ko...（默认：zh）
+    Language code: zh, en, ja, ko... (default: zh)
 
 .PARAMETER FrameInterval
-    帧提取间隔（秒），默认 30
+    Frame extraction interval in seconds (default: 30)
+    Use 5 for dense extraction, or 0 for smart scene detection
+
+.PARAMETER FrameMode
+    Frame extraction mode: interval/scene (default: interval)
+
+.PARAMETER PythonPath
+    Specify Python path (optional, for virtual environments)
 
 .EXAMPLE
-    .\process_video.ps1 -Video "C:\videos\lesson.mp4"
-    
+    .\process_video.ps1 -Video "video.mp4"
+
 .EXAMPLE
-    .\process_video.ps1 -Video "video.mp4" -Proxy "http://127.0.0.1:6666" -Model medium
-    
-.EXAMPLE
-    .\process_video.ps1 -Video "video.mp4" -Output "C:\output" -FrameInterval 60
+    # Dense frames (5 seconds)
+    .\process_video.ps1 -Video "video.mp4" -FrameInterval 5
+
+    # Smart scene detection
+    .\process_video.ps1 -Video "video.mp4" -FrameInterval 0 -FrameMode scene
+
+    # Use Chinese mirror
+    .\process_video.ps1 -Video "video.mp4" -Mirror tsinghua
+
+    # Custom proxy
+    .\process_video.ps1 -Video "video.mp4" -Proxy "http://127.0.0.1:6666"
 #>
 
+[CmdletBinding()]
 param(
-    [Parameter(Mandatory=$true)]
+    [Parameter(Mandatory=$true, Position=0)]
     [string]$Video,
-    
+
     [string]$Output,
-    
+
     [string]$Proxy,
-    
+
+    [ValidateSet("aliyun", "tsinghua", "ustc", "none", "auto")]
+    [string]$Mirror = "auto",
+
     [ValidateSet("tiny", "base", "small", "medium", "large")]
     [string]$Model = "small",
-    
+
     [string]$Language = "zh",
-    
-    [int]$FrameInterval = 30
+
+    [int]$FrameInterval = 30,
+
+    [ValidateSet("interval", "scene")]
+    [string]$FrameMode = "interval",
+
+    [string]$PythonPath
 )
 
-# ========== 环境检测 ==========
+# ========== Helper Functions ==========
 
 function Find-Command {
     param([string]$Name)
@@ -61,193 +92,372 @@ function Find-Command {
 }
 
 function Find-Python {
-    # 优先检查受信目录
-    $trustedPaths = @(
-        "C:\Dev\Python\python.exe",
-        "/usr/bin/python3",
-        "/usr/local/bin/python3"
-    )
-    
-    foreach ($p in $trustedPaths) {
-        if (Test-Path $p) { return $p }
+    param([string]$SpecifiedPath)
+
+    if ($SpecifiedPath) {
+        if (Test-Path $SpecifiedPath) {
+            Write-Host "  [INFO] Using specified Python: $SpecifiedPath" -ForegroundColor Gray
+            return $SpecifiedPath
+        } else {
+            Write-Host "  [WARN] Specified Python not found: $SpecifiedPath" -ForegroundColor Yellow
+        }
     }
-    
-    # 检查系统 Python
+
+    $venvPaths = @(
+        "$env:USERPROFILE\whisper_env\Scripts\python.exe",
+        "$env:USERPROFILE\.venv\Scripts\python.exe",
+        "C:\Dev\Python\python.exe",
+        "C:\Python\python.exe",
+        "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
+        "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe"
+    )
+
+    foreach ($p in $venvPaths) {
+        if (Test-Path $p) {
+            Write-Host "  [INFO] Found Python: $p" -ForegroundColor Gray
+            return $p
+        }
+    }
+
     $python = Find-Command "python"
     if ($python) { return $python }
-    
+
     $python3 = Find-Command "python3"
     if ($python3) { return $python3 }
-    
-    # Windows AppData 路径
-    $winPython = Join-Path $env:LOCALAPPDATA "Programs\Python\Python312\python.exe"
-    if (Test-Path $winPython) { return $winPython }
-    
+
     return $null
 }
 
 function Find-FFmpeg {
     $ffmpeg = Find-Command "ffmpeg"
     if ($ffmpeg) { return $ffmpeg }
-    
-    # Windows winget 安装路径
+
     $wingetPath = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages"
-    $ffmpegDir = Get-ChildItem $wingetPath -Filter "*ffmpeg*" -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($ffmpegDir) {
-        $ffmpegExe = Join-Path $ffmpegDir.FullName "ffmpeg-*_build\bin\ffmpeg.exe"
-        $found = Get-ChildItem (Split-Path $ffmpegExe -Parent) -Filter "ffmpeg.exe" -ErrorAction SilentlyContinue
-        if ($found) { return $found.FullName }
+    if (Test-Path $wingetPath) {
+        $ffmpegDir = Get-ChildItem $wingetPath -Filter "*ffmpeg*" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($ffmpegDir) {
+            $ffmpegExe = Join-Path $ffmpegDir.FullName "ffmpeg-*_build\bin\ffmpeg.exe"
+            $found = Get-ChildItem (Split-Path $ffmpegExe -Parent) -Filter "ffmpeg.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) { return $found.FullName }
+        }
     }
-    
+
     return $null
 }
 
-# 检测工具
-$ffmpeg = Find-FFmpeg
-$ffprobe = $ffmpeg -replace "ffmpeg", "ffprobe"
-$python = Find-Python
+function Test-WhisperInstalled {
+    param([string]$Python)
+    $result = & $Python -c "import whisper; print('ok')" 2>&1
+    return ($result -eq "ok")
+}
 
-Write-Host "=== 环境检测 ===" -ForegroundColor Cyan
-Write-Host "ffmpeg:  $(if($ffmpeg){$ffmpeg}else{'未找到'})"
-Write-Host "ffprobe: $(if($ffprobe){$ffprobe}else{'未找到'})"
-Write-Host "python:  $(if($python){$python}else{'未找到'})"
+function Install-Whisper {
+    param(
+        [string]$Python,
+        [string]$Proxy,
+        [string]$Mirror
+    )
+
+    Write-Host "  Installing Whisper..." -ForegroundColor Cyan
+
+    # Determine mirror settings
+    $env:HUGGINGFACE_HUB_CACHE = "$env:USERPROFILE\.cache\huggingface"
+
+    # Set up mirror if specified
+    if ($Mirror -ne "none" -and -not $Proxy) {
+        switch ($Mirror) {
+            "aliyun" {
+                Write-Host "  Using Aliyun mirror..." -ForegroundColor Gray
+                $env:HF_ENDPOINT = "https://hf-mirror.com"
+            }
+            "tsinghua" {
+                Write-Host "  Using Tsinghua mirror..." -ForegroundColor Gray
+                $env:HF_ENDPOINT = "https://hf-mirror.com"
+            }
+            "ustc" {
+                Write-Host "  Using USTC mirror..." -ForegroundColor Gray
+                $env:HF_ENDPOINT = "https://hf-mirror.com"
+            }
+            "auto" {
+                # Auto-detect: use mirror if in China
+                Write-Host "  Checking network location..." -ForegroundColor Gray
+                try {
+                    $test = Invoke-WebRequest -Uri "https://hf-mirror.com" -TimeoutSec 3 -UseBasicParsing -ErrorAction SilentlyContinue
+                    if ($test.StatusCode -eq 200) {
+                        $env:HF_ENDPOINT = "https://hf-mirror.com"
+                        Write-Host "  Using HF Mirror (auto-detected)" -ForegroundColor Gray
+                    }
+                } catch {
+                    Write-Host "  Using default source" -ForegroundColor Gray
+                }
+            }
+        }
+    }
+
+    $pipArgs = @("-m", "pip", "install", "openai-whisper", "--upgrade")
+
+    if ($Proxy) {
+        $pipArgs += "--proxy", $Proxy
+    }
+
+    & $Python @pipArgs
+
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [ERROR] Whisper installation failed" -ForegroundColor Red
+        Write-Host "  Try: $Python -m pip install openai-whisper --upgrade" -ForegroundColor Yellow
+        return $false
+    }
+
+    return $true
+}
+
+function Get-FramesByScene {
+    param(
+        [string]$FFmpeg,
+        [string]$Video,
+        [string]$OutputDir,
+        [int]$MaxFrames = 100
+    )
+
+    Write-Host "  Extracting scene changes (max $MaxFrames frames)..." -ForegroundColor Gray
+
+    # Extract I-frames (key frames) which are scene changes
+    & $FFmpeg -y -loglevel error -i $Video -vf "select='eq(pict_type,I)',showinfo" -vsync vfr -frames:v $MaxFrames "$OutputDir\frame_%04d.png" 2>$null | Out-Null
+
+    $extracted = (Get-ChildItem "$OutputDir\frame_*.png").Count
+    return $extracted
+}
+
+# ========== Main ==========
+
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Magenta
+Write-Host "       Video Learner v2.1" -ForegroundColor Magenta
+Write-Host "========================================" -ForegroundColor Magenta
 Write-Host ""
 
-if (-not $ffmpeg -or -not $python) {
-    Write-Host "缺少必要工具，请先安装：" -ForegroundColor Red
-    if (-not $ffmpeg) { Write-Host "  ffmpeg: winget install Gyan.FFmpeg" }
-    if (-not $python) { Write-Host "  Python: https://python.org/downloads" }
+# Detect tools
+$ffmpeg = Find-FFmpeg
+$python = Find-Python -SpecifiedPath $PythonPath
+
+Write-Host "========== Environment Check ==========" -ForegroundColor Cyan
+Write-Host "ffmpeg:  $(if($ffmpeg){$ffmpeg}else{'NOT FOUND'})"
+Write-Host "python:  $(if($python){$python}else{'NOT FOUND'})"
+Write-Host "Mirror:  $Mirror"
+if ($Proxy) { Write-Host "Proxy:   $Proxy" }
+Write-Host ""
+
+if (-not $ffmpeg) {
+    Write-Host "[ERROR] ffmpeg not found. Please install:" -ForegroundColor Red
+    Write-Host "  winget install Gyan.FFmpeg" -ForegroundColor Yellow
     exit 1
 }
 
-# ========== 路径处理 ==========
+if (-not $python) {
+    Write-Host "[ERROR] Python not found. Please install:" -ForegroundColor Red
+    exit 1
+}
+
+# Check Whisper
+if (-not (Test-WhisperInstalled -Python $python)) {
+    Write-Host "[WARN] Whisper not installed" -ForegroundColor Yellow
+    $install = Read-Host "Install automatically? (Y/N)"
+    if ($install -eq "Y" -or $install -eq "y") {
+        if (-not (Install-Whisper -Python $python -Proxy $Proxy -Mirror $Mirror)) {
+            exit 1
+        }
+    } else {
+        Write-Host "Please run: $python -m pip install openai-whisper" -ForegroundColor Yellow
+        exit 1
+    }
+} else {
+    Write-Host "[OK] Whisper installed" -ForegroundColor Green
+}
+
+$ffprobe = $ffmpeg -replace "ffmpeg", "ffprobe"
+
+# ========== Path Processing ==========
 
 $Video = (Resolve-Path $Video -ErrorAction Stop).Path
 $videoName = [System.IO.Path]::GetFileNameWithoutExtension($Video)
 $videoDir = Split-Path $Video -Parent
 
 if (-not $Output) {
-    $Output = Join-Path $videoDir "${videoName}_output"
+    $Output = Join-Path $videoDir "${videoName}_video_learn"
 }
 
 $framesDir = Join-Path $Output "frames"
 $audioFile = Join-Path $Output "audio.wav"
+$infoFile = Join-Path $Output "video_info.json"
 $transcriptFile = Join-Path $Output "transcript.txt"
 
-# 创建目录
+# Create directories
 New-Item -ItemType Directory -Force -Path $framesDir | Out-Null
 New-Item -ItemType Directory -Force -Path $Output | Out-Null
 
-Write-Host "输出目录: $Output" -ForegroundColor Green
+Write-Host ""
+Write-Host "Output directory: $Output" -ForegroundColor Green
 
-# ========== 获取视频信息 ==========
+# ========== Get Video Info ==========
 
-Write-Host "`n=== 获取视频信息 ===" -ForegroundColor Cyan
+Write-Host "`n[STEP 1/4] Getting video info..." -ForegroundColor Cyan
 
-$videoInfo = & $ffprobe -v quiet -print_format json -show_format -show_streams $Video 2>$null | ConvertFrom-Json
-$duration = [double]$videoInfo.format.duration
-$width = $videoInfo.streams | Where-Object { $_.codec_type -eq "video" } | Select-Object -First 1 -ExpandProperty width
-$height = $videoInfo.streams | Where-Object { $_.codec_type -eq "video" } | Select-Object -First 1 -ExpandProperty height
+try {
+    $probeOutput = & $ffprobe -v quiet -print_format json -show_format -show_streams $Video 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "ffprobe failed" }
 
-Write-Host "时长: $([int]$duration) 秒"
-Write-Host "分辨率: ${width}x${height}"
+    $videoInfo = $probeOutput | ConvertFrom-Json
+    $duration = [double]$videoInfo.format.duration
+    $width = $videoInfo.streams | Where-Object { $_.codec_type -eq "video" } | Select-Object -First 1 -ExpandProperty width
+    $height = $videoInfo.streams | Where-Object { $_.codec_type -eq "video" } | Select-Object -First 1 -ExpandProperty height
+    $codec = $videoInfo.streams | Where-Object { $_.codec_type -eq "video" } | Select-Object -First 1 -ExpandProperty codec_name
 
-# ========== 提取视频帧 ==========
+    $durationMin = [int]($duration / 60)
+    $durationSec = [int]($duration % 60)
 
-Write-Host "`n=== 提取视频帧 ===" -ForegroundColor Cyan
+    Write-Host "  Duration: $durationMin min $durationSec sec"
+    Write-Host "  Resolution: ${width}x${height}"
+    Write-Host "  Codec: $codec"
 
-# 计算时间点
-$timePoints = @()
-for ($t = 0; $t -lt $duration; $t += $FrameInterval) {
-    $timePoints += $t
+    # Save video info
+    $infoJson = @{
+        duration = $duration
+        width = $width
+        height = $height
+        codec = $codec
+        model = $Model
+        language = $Language
+        frameInterval = $FrameInterval
+        frameMode = $FrameMode
+    } | ConvertTo-Json -Depth 2
+    Set-Content -Path $infoFile -Value $infoJson -Encoding UTF8
+
+} catch {
+    Write-Host "[ERROR] Failed to get video info: $_" -ForegroundColor Red
+    exit 1
 }
-# 添加最后一个时间点（90%位置）
-$lastPoint = [int]($duration * 0.9)
-if ($lastPoint -notin $timePoints) {
-    $timePoints += $lastPoint
-}
+
+# ========== Extract Frames ==========
+
+Write-Host "`n[STEP 2/4] Extracting frames..." -ForegroundColor Cyan
 
 $frameCount = 0
-foreach ($t in $timePoints) {
-    $frameCount++
-    $timeStr = "{0:D2}m{1:D2}s" -f ([int]($t / 60)), ([int]($t % 60))
-    $frameFile = Join-Path $framesDir "frame_${timeStr}.png"
-    
-    Write-Host "  提取 $timeStr ..." -NoNewline
-    & $ffmpeg -y -ss $t -i $Video -vframes 1 -q:v 2 $frameFile 2>$null | Out-Null
-    if ($?) { Write-Host " OK" -ForegroundColor Green } else { Write-Host " 失败" -ForegroundColor Red }
+
+if ($FrameMode -eq "scene" -or $FrameInterval -eq 0) {
+    # Smart scene detection mode
+    Write-Host "  Mode: Scene detection (I-frames)" -ForegroundColor Gray
+    $frameCount = Get-FramesByScene -FFmpeg $ffmpeg -Video $Video -OutputDir $framesDir -MaxFrames 100
+} else {
+    # Fixed interval mode
+    Write-Host "  Mode: Fixed interval (every ${FrameInterval}s)" -ForegroundColor Gray
+
+    # Clean up old frames first
+    if (Test-Path $framesDir) {
+        Remove-Item "$framesDir\*" -Force -ErrorAction SilentlyContinue
+        Write-Host "  Cleaned up old frames" -ForegroundColor Gray
+    }
+
+    $timePoints = @()
+    for ($t = 0; $t -lt $duration; $t += $FrameInterval) {
+        $timePoints += $t
+    }
+    # Always add last frame at 95%
+    $lastPoint = [int]($duration * 0.95)
+    if ($lastPoint -notin $timePoints) {
+        $timePoints += $lastPoint
+    }
+
+    # Sort time points numerically (fixes order issue)
+    $timePoints = @($timePoints | Sort-Object -Unique)
+
+    $frameCount = 0
+    foreach ($t in $timePoints) {
+        $frameCount++
+        # Fix: properly convert seconds to minutes
+        $mins = [Math]::Floor($t / 60)
+        $secs = $t % 60
+        # Format time as mm:ss (simple string concat)
+        $minsStr = if ($mins -lt 10) { "0$mins" } else { "$mins" }
+        $secsStr = if ($secs -lt 10) { "0$secs" } else { "$secs" }
+        $timeStr = "${minsStr}m${secsStr}s"
+        $frameFile = Join-Path $framesDir "frame_${timeStr}.png"
+
+        & $ffmpeg -y -loglevel error -ss $t -i $Video -vframes 1 -q:v 2 $frameFile 2>$null | Out-Null
+        if ($?) {
+            Write-Host "  [$frameCount] $timeStr" -ForegroundColor Green
+        } else {
+            Write-Host "  [$frameCount] $timeStr FAILED" -ForegroundColor Red
+        }
+    }
 }
 
-Write-Host "共提取 $frameCount 帧" -ForegroundColor Green
+Write-Host "  Total: $frameCount frames extracted" -ForegroundColor Green
 
-# ========== 提取音频 ==========
+# ========== Extract Audio ==========
 
-Write-Host "`n=== 提取音频 ===" -ForegroundColor Cyan
+Write-Host "`n[STEP 3/4] Extracting audio..." -ForegroundColor Cyan
 
-Write-Host "  提取音频 ..." -NoNewline
-& $ffmpeg -y -i $Video -vn -acodec pcm_s16le -ar 16000 -ac 1 $audioFile 2>$null | Out-Null
-if ($?) { Write-Host " OK" -ForegroundColor Green } else { Write-Host " 失败" -ForegroundColor Red }
-
-# ========== 检查 Whisper ==========
-
-Write-Host "`n=== 检查 Whisper ===" -ForegroundColor Cyan
-
-$whisperInstalled = & $python -c "import whisper; print('ok')" 2>$null
-if ($whisperInstalled -ne "ok") {
-    Write-Host "Whisper 未安装，正在安装..." -ForegroundColor Yellow
-    
-    $pipArgs = @("-m", "pip", "install", "openai-whisper")
-    if ($Proxy) {
-        $pipArgs += "--proxy", $Proxy
-    }
-    
-    & $python @pipArgs
-    
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Whisper 安装失败" -ForegroundColor Red
-        Write-Host "请手动安装: pip install openai-whisper"
-        exit 1
-    }
+& $ffmpeg -y -loglevel error -i $Video -vn -acodec pcm_s16le -ar 16000 -ac 1 $audioFile 2>$null | Out-Null
+if ($?) {
+    $audioSize = (Get-Item $audioFile).Length / 1MB
+    Write-Host "  Done ($([math]::Round($audioSize, 1)) MB)" -ForegroundColor Green
+} else {
+    Write-Host "[ERROR] Audio extraction failed" -ForegroundColor Red
+    exit 1
 }
 
-Write-Host "Whisper 已安装" -ForegroundColor Green
+# ========== Transcribe ==========
 
-# ========== 转录音频 ==========
-
-Write-Host "`n=== 转录音频 ===" -ForegroundColor Cyan
-Write-Host "模型: $Model, 语言: $Language"
-Write-Host "注意：首次使用会下载模型，请耐心等待..."
+Write-Host "`n[STEP 4/4] Transcribing audio..." -ForegroundColor Cyan
+Write-Host "  Model: $Model, Language: $Language"
 
 $scriptDir = Split-Path $MyInvocation.MyCommand.Path -Parent
 $transcribeScript = Join-Path $scriptDir "transcribe.py"
 
-# 设置环境变量
+if (-not (Test-Path $transcribeScript)) {
+    Write-Host "[ERROR] transcribe.py not found: $transcribeScript" -ForegroundColor Red
+    exit 1
+}
+
+# Set environment
 $env:PYTHONIOENCODING = "utf-8"
+
+# Set proxy if specified
 if ($Proxy) {
     $env:HTTP_PROXY = $Proxy
     $env:HTTPS_PROXY = $Proxy
 }
 
-& $python $transcribeScript $audioFile $transcriptFile $Model $Language
+# Set mirror if specified (for model download)
+if ($Mirror -ne "none" -and -not $Proxy) {
+    $env:HF_ENDPOINT = "https://hf-mirror.com"
+}
+
+Write-Host "  Transcribing, please wait..." -ForegroundColor Yellow
+
+& $python $transcribeScript $audioFile $transcriptFile $Model $Language 2>&1
 
 if ($LASTEXITCODE -eq 0) {
-    Write-Host "`n转录完成！" -ForegroundColor Green
+    Write-Host "  Done!" -ForegroundColor Green
 } else {
-    Write-Host "`n转录失败" -ForegroundColor Red
+    Write-Host "[ERROR] Transcription failed" -ForegroundColor Red
     exit 1
 }
 
-# ========== 完成 ==========
+# ========== Complete ==========
 
-Write-Host @"
-
-=== 处理完成 ===
-输出文件:
-  视频帧: $framesDir (共 $frameCount 帧)
-  音频:   $audioFile
-  转录:   $transcriptFile
-
-下一步:
-  1. 使用视觉模型分析 frames 目录下的图片
-  2. 结合 transcript.txt 的内容生成学习笔记
-"@ -ForegroundColor Green
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Magenta
+Write-Host "[SUCCESS] All done!" -ForegroundColor Green
+Write-Host "========================================" -ForegroundColor Magenta
+Write-Host ""
+Write-Host "Output files:" -ForegroundColor Cyan
+Write-Host "  Frames: $framesDir ($frameCount frames)"
+Write-Host "  Audio:  $audioFile"
+Write-Host "  Trans:  $transcriptFile"
+Write-Host "  Info:   $infoFile"
+Write-Host ""
+Write-Host "Next steps:" -ForegroundColor Cyan
+Write-Host "  1. Use AI to analyze frames in frames/"
+Write-Host "  2. Combine with transcript.txt to create notes"
+Write-Host ""

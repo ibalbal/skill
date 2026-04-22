@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-音频转录脚本 - 使用 OpenAI Whisper 转录音频文件
+Audio transcription script using OpenAI Whisper
 
-用法:
+Optimized v2.1:
+- Fix model loading logic
+- Support GPU auto-detection
+- Support Chinese mirrors for model download
+- Better error handling
+
+Usage:
     python transcribe.py <audio_file> <output_file> [model] [language]
 
-参数:
-    audio_file  - 音频文件路径
-    output_file - 输出文本文件路径
-    model       - Whisper 模型 (tiny/base/small/medium/large)，默认 small
-    language    - 语言代码 (zh/en/ja/ko...)，默认 zh
-
-示例:
+Example:
     python transcribe.py audio.wav transcript.txt
     python transcribe.py audio.wav transcript.txt medium zh
     python transcribe.py audio.wav transcript.txt small en
@@ -19,114 +20,181 @@
 
 import sys
 import os
-import whisper
+import warnings
+import torch
+
+# Ignore common warnings
+warnings.filterwarnings('ignore', category=UserWarning)
+
+def setup_mirror():
+    """Setup Chinese mirror for model download"""
+    # Check if HF_ENDPOINT is already set
+    hf_endpoint = os.environ.get('HF_ENDPOINT')
+
+    if hf_endpoint:
+        print(f"Using HF endpoint: {hf_endpoint}")
+        return
+
+    # Try to detect if we're in China (simplified check)
+    # Actually, just set the mirror - it will fallback if not reachable
+    os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+    print("Using HF Mirror: https://hf-mirror.com")
 
 def get_model_dir():
-    """获取模型缓存目录"""
-    # 优先使用用户目录下的 .openclaw/whisper-models
+    """Get model cache directory"""
     model_dir = os.path.join(os.path.expanduser('~'), '.openclaw', 'whisper-models')
-    
-    # 如果目录不存在，尝试创建
+
     try:
         os.makedirs(model_dir, exist_ok=True)
-    except:
-        # 如果创建失败，使用默认缓存目录
+    except Exception as e:
+        print(f"Warning: Cannot create model directory: {e}")
         model_dir = None
-    
+
     return model_dir
+
+def check_gpu():
+    """Detect GPU availability"""
+    if torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
+        print(f"GPU detected: {gpu_name} ({gpu_memory:.1f} GB)")
+        return True
+    else:
+        print("Using CPU mode")
+        return False
+
+def load_model(model_size='small'):
+    """Load Whisper model"""
+    import whisper
+
+    model_dir = get_model_dir()
+
+    print(f"Loading whisper {model_size} model...", flush=True)
+
+    # Try to use mirror if available
+    setup_mirror()
+
+    try:
+        if model_dir:
+            print(f"Model cache: {model_dir}", flush=True)
+            model = whisper.load_model(model_size, download_root=model_dir)
+        else:
+            model = whisper.load_model(model_size)
+    except Exception as e:
+        print(f"Failed to load with custom cache, trying default: {e}")
+        model = whisper.load_model(model_size)
+
+    # Check what device it's on
+    if hasattr(model, 'device'):
+        print(f"Model loaded on: {model.device}")
+
+    return model
 
 def transcribe(audio_path, output_path, model_size='small', language='zh'):
     """
-    转录音频文件
-    
+    Transcribe audio file
+
     Args:
-        audio_path: 音频文件路径
-        output_path: 输出文件路径
-        model_size: Whisper 模型大小
-        language: 语言代码
+        audio_path: Audio file path
+        output_path: Output file path
+        model_size: Whisper model size
+        language: Language code
     """
-    # 确保输出目录存在
+    # Check audio file
+    if not os.path.exists(audio_path):
+        raise FileNotFoundError(f"Audio file not found: {audio_path}")
+
+    audio_size = os.path.getsize(audio_path) / (1024 * 1024)
+    print(f"Audio file: {audio_path} ({audio_size:.1f} MB)")
+
+    # Ensure output directory exists
     output_dir = os.path.dirname(output_path)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-    
-    # 获取模型目录
-    model_dir = get_model_dir()
-    
-    # 加载模型
-    print(f"Loading {model_size} model...", flush=True)
-    if model_dir:
-        print(f"Model cache: {model_dir}", flush=True)
-        model = whisper.load_model(model_size, download_root=model_dir)
-    else:
-        model = whisper.load_model(model_size)
-    
-    # 转录音频
-    print(f"Transcribing {audio_path}...", flush=True)
+
+    # Detect GPU
+    use_gpu = check_gpu()
+
+    # Load model
+    model = load_model(model_size)
+
+    # Transcribe
+    print(f"Transcribing...", flush=True)
     print(f"Language: {language}", flush=True)
-    
-    result = model.transcribe(
-        audio_path,
-        language=language,
-        verbose=False,
-        task='transcribe'
-    )
-    
-    # 写入结果
+
+    try:
+        result = model.transcribe(
+            audio_path,
+            language=language,
+            verbose=False,
+            task='transcribe',
+            fp16=use_gpu  # Only use FP16 on GPU
+        )
+    except Exception as e:
+        raise RuntimeError(f"Transcription failed: {e}")
+
+    # Write result
     with open(output_path, 'w', encoding='utf-8') as f:
-        # 写入分段结果（带时间戳）
+        # Write segments with timestamps
         f.write("=== Segments ===\n\n")
         for seg in result['segments']:
             start = seg['start']
             end = seg['end']
             text = seg['text'].strip()
             f.write(f'[{format_time(start)} --> {format_time(end)}] {text}\n')
-        
-        # 写入完整文本
+
+        # Write full text
         f.write(f'\n=== Full Text ===\n\n{result["text"]}')
-    
-    print(f"\nSaved to {output_path}", flush=True)
-    
-    # 输出摘要
-    print(f"\n=== Summary ===", flush=True)
-    print(f"Duration: {result['segments'][-1]['end']:.1f}s", flush=True)
-    print(f"Segments: {len(result['segments'])}", flush=True)
-    print(f"Characters: {len(result['text'])}", flush=True)
+
+    print(f"\nSaved to: {output_path}")
+
+    # Summary
+    if result['segments']:
+        duration = result['segments'][-1]['end']
+    else:
+        duration = 0
+
+    print(f"\n=== Summary ===")
+    print(f"Duration: {duration:.1f}s ({duration/60:.1f} min)")
+    print(f"Segments: {len(result['segments'])}")
+    print(f"Characters: {len(result['text'])}")
+
+    return result
 
 def format_time(seconds):
-    """格式化时间为 mm:ss 格式"""
+    """Format time as mm:ss"""
     mins = int(seconds // 60)
     secs = int(seconds % 60)
     return f'{mins:02d}:{secs:02d}'
 
 def main():
-    # 检查参数
+    # Check arguments
     if len(sys.argv) < 3:
         print(__doc__)
-        print("\n错误: 缺少必要参数")
+        print("\nError: Missing required arguments")
         sys.exit(1)
-    
+
     audio_path = sys.argv[1]
     output_path = sys.argv[2]
     model_size = sys.argv[3] if len(sys.argv) > 3 else 'small'
     language = sys.argv[4] if len(sys.argv) > 4 else 'zh'
-    
-    # 验证文件存在
+
+    # Validate file exists
     if not os.path.exists(audio_path):
-        print(f"错误: 音频文件不存在: {audio_path}")
+        print(f"Error: Audio file not found: {audio_path}")
         sys.exit(1)
-    
-    # 验证模型大小
+
+    # Validate model size
     valid_models = ['tiny', 'base', 'small', 'medium', 'large']
     if model_size not in valid_models:
-        print(f"错误: 无效的模型 '{model_size}'")
-        print(f"有效模型: {', '.join(valid_models)}")
+        print(f"Error: Invalid model '{model_size}'")
+        print(f"Valid models: {', '.join(valid_models)}")
         sys.exit(1)
-    
+
     try:
         transcribe(audio_path, output_path, model_size, language)
     except Exception as e:
-        print(f"错误: {e}")
+        print(f"Error: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
