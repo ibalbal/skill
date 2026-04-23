@@ -163,51 +163,82 @@ function Install-Whisper {
     # Determine mirror settings
     $env:HUGGINGFACE_HUB_CACHE = "$env:USERPROFILE\.cache\huggingface"
 
+    # pip 国内镜像源列表 (按推荐顺序)
+    $pipMirrors = @{
+        "tsinghua" = "https://pypi.tuna.tsinghua.edu.cn/simple"
+        "aliyun"   = "https://mirrors.aliyun.com/pypi/simple"
+        "ustc"     = "https://mirrors.ustc.edu.cn/pypi/web/simple"
+        "douban"   = "https://pypi.doubanio.com/simple"
+    }
+
+    $pipMirrorUrl = $null
+    $hfEndpoint = $null
+
     # Set up mirror if specified
     if ($Mirror -ne "none" -and -not $Proxy) {
         switch ($Mirror) {
-            "aliyun" {
-                Write-Host "  Using Aliyun mirror..." -ForegroundColor Gray
-                $env:HF_ENDPOINT = "https://hf-mirror.com"
-            }
-            "tsinghua" {
-                Write-Host "  Using Tsinghua mirror..." -ForegroundColor Gray
-                $env:HF_ENDPOINT = "https://hf-mirror.com"
-            }
-            "ustc" {
-                Write-Host "  Using USTC mirror..." -ForegroundColor Gray
-                $env:HF_ENDPOINT = "https://hf-mirror.com"
+            { $_ -in @("aliyun", "tsinghua", "ustc") } {
+                $pipMirrorUrl = $pipMirrors[$_]
+                $hfEndpoint = "https://hf-mirror.com"
+                Write-Host "  Using $Mirror mirror for pip..." -ForegroundColor Gray
             }
             "auto" {
-                # Auto-detect: use mirror if in China
-                Write-Host "  Checking network location..." -ForegroundColor Gray
-                try {
-                    $test = Invoke-WebRequest -Uri "https://hf-mirror.com" -TimeoutSec 3 -UseBasicParsing -ErrorAction SilentlyContinue
-                    if ($test.StatusCode -eq 200) {
-                        $env:HF_ENDPOINT = "https://hf-mirror.com"
-                        Write-Host "  Using HF Mirror (auto-detected)" -ForegroundColor Gray
+                # Auto-detect: try to find fastest mirror
+                Write-Host "  Detecting fastest mirror..." -ForegroundColor Gray
+                foreach ($kv in $pipMirrors.GetEnumerator()) {
+                    try {
+                        $test = Invoke-WebRequest -Uri "$($kv.Value)/whisper/" -TimeoutSec 5 -UseBasicParsing -ErrorAction SilentlyContinue
+                        if ($test.StatusCode -eq 200 -or $test.StatusCode -eq 404) {
+                            $pipMirrorUrl = $kv.Value
+                            $hfEndpoint = "https://hf-mirror.com"
+                            Write-Host "  Auto-selected: $($kv.Key) mirror" -ForegroundColor Green
+                            break
+                        }
+                    } catch {
+                        # Try next mirror
                     }
-                } catch {
-                    Write-Host "  Using default source" -ForegroundColor Gray
+                }
+                if (-not $pipMirrorUrl) {
+                    Write-Host "  No mirror reachable, using default" -ForegroundColor Gray
                 }
             }
         }
     }
 
-    $pipArgs = @("-m", "pip", "install", "openai-whisper", "--upgrade")
-
-    if ($Proxy) {
-        $pipArgs += "--proxy", $Proxy
+    # Set HF_ENDPOINT for HuggingFace model download
+    if ($hfEndpoint) {
+        $env:HF_ENDPOINT = $hfEndpoint
+        Write-Host "  HF_ENDPOINT: $hfEndpoint" -ForegroundColor Gray
     }
 
+    # Build pip arguments
+    $pipArgs = @("-m", "pip", "install", "openai-whisper", "--upgrade", "--trusted-host", "pypi.org", "--trusted-host", "pypi.python.org", "--trusted-host", "files.pythonhosted.org")
+
+    # Add mirror if specified
+    if ($pipMirrorUrl) {
+        $pipArgs += "-i", $pipMirrorUrl
+        Write-Host "  pip index: $pipMirrorUrl" -ForegroundColor Gray
+    }
+
+    # Add proxy if specified
+    if ($Proxy) {
+        $pipArgs += "--proxy", $Proxy
+        Write-Host "  Using proxy: $Proxy" -ForegroundColor Gray
+    }
+
+    # Execute pip install
+    Write-Host "  Running: $Python $($pipArgs -join ' ')" -ForegroundColor Gray
     & $Python @pipArgs
 
     if ($LASTEXITCODE -ne 0) {
         Write-Host "  [ERROR] Whisper installation failed" -ForegroundColor Red
-        Write-Host "  Try: $Python -m pip install openai-whisper --upgrade" -ForegroundColor Yellow
+        Write-Host "  Try one of these commands:" -ForegroundColor Yellow
+        Write-Host "    $Python -m pip install openai-whisper -i https://pypi.tuna.tsinghua.edu.cn/simple" -ForegroundColor Yellow
+        Write-Host "    $Python -m pip install openai-whisper --proxy http://your-proxy:port" -ForegroundColor Yellow
         return $false
     }
 
+    Write-Host "  [OK] Whisper installed successfully" -ForegroundColor Green
     return $true
 }
 

@@ -16,7 +16,22 @@ metadata:
 
 从视频中提取画面和音频，生成完整的学习笔记。
 
-## 快速开始
+## ⚡ 快速开始（国内用户必看）
+
+```powershell
+# 国内用户：直接使用清华镜像（推荐）
+.\process_video.ps1 -Video "video.mp4" -Mirror tsinghua
+
+# 或使用阿里云镜像
+.\process_video.ps1 -Video "video.mp4" -Mirror aliyun
+
+# 自动选择最快镜像
+.\process_video.ps1 -Video "video.mp4" -Mirror auto
+```
+
+> 🇨🇳 **国内用户**：由于 HuggingFace 和 PyPI 在国内访问不稳定，请**务必指定 `-Mirror` 参数**，否则安装依赖可能失败！
+
+## 基本用法
 
 ```powershell
 # 处理视频（默认30秒一帧）
@@ -28,11 +43,8 @@ metadata:
 # 智能场景检测（自动提取关键帧）
 .\process_video.ps1 -Video "video.mp4" -FrameMode scene
 
-# 使用中国镜像下载模型
-.\process_video.ps1 -Video "video.mp4" -Mirror tsinghua
-
 # 使用代理
-.\process_video.ps1 -Video "video.mp4" -Proxy "http://127.0.0.1:6666"
+.\process_video.ps1 -Video "video.mp4" -Proxy "http://127.0.0.1:7890"
 ```
 
 ## 参数说明
@@ -43,7 +55,7 @@ metadata:
 | `-Output` | 输出目录 | 视频同目录下的 `_video_learn` |
 | `-FrameInterval` | 帧提取间隔（秒），0表示智能检测 | 30 |
 | `-FrameMode` | 提取模式：interval(固定间隔) / scene(场景检测) | interval |
-| `-Mirror` | 模型下载镜像：aliyun/tsinghua/ustc/auto/none | auto |
+| `-Mirror` | pip镜像：tsinghua/aliyun/ustc/auto/none | auto |
 | `-Proxy` | 代理地址 | 无 |
 | `-Model` | Whisper 模型 (tiny/base/small/medium/large) | small |
 | `-Language` | 语言代码 (zh/en/ja...) | zh |
@@ -51,10 +63,42 @@ metadata:
 
 ---
 
+## 🇨🇳 国内镜像配置
+
+### 问题：依赖下载失败
+
+Whisper 依赖 PyPI 和 HuggingFace，国内访问可能超时或失败。
+
+### ✅ 解决方案：使用国内镜像
+
+```powershell
+# 方案1：指定镜像（推荐）
+.\process_video.ps1 -Video "video.mp4" -Mirror tsinghua
+
+# 方案2：使用代理
+.\process_video.ps1 -Video "video.mp4" -Proxy "http://127.0.0.1:7890"
+
+# 方案3：手动安装依赖
+pip install openai-whisper -i https://pypi.tuna.tsinghua.edu.cn/simple
+$env:HF_ENDPOINT = "https://hf-mirror.com"
+.\process_video.ps1 -Video "video.mp4"
+```
+
+### 可用镜像源
+
+| 镜像 | pip 地址 | HuggingFace |
+|------|---------|-------------|
+| `-Mirror tsinghua` | pypi.tuna.tsinghua.edu.cn | hf-mirror.com |
+| `-Mirror aliyun` | mirrors.aliyun.com/pypi | hf-mirror.com |
+| `-Mirror ustc` | mirrors.ustc.edu.cn/pypi | hf-mirror.com |
+| `-Mirror auto` | 自动检测最快 | hf-mirror.com |
+
+---
+
 ## 功能
 
 1. **智能分帧** - 支持固定间隔(5s/10s/30s)或场景检测模式
-2. **中国镜像** - 自动使用 hf-mirror.com 下载模型，解决国内网络问题
+2. **国内镜像** - 自动使用清华/阿里云镜像下载模型和依赖
 3. **环境自动检测** - 检测 ffmpeg、Python、Whisper，支持虚拟环境
 4. **视频帧提取** - 使用 ffmpeg 提取关键帧画面
 5. **音频提取** - 使用 ffmpeg 提取音频轨道
@@ -90,51 +134,19 @@ metadata:
 
 ---
 
-## 网络问题解决
-
-### 问题：模型下载失败
-
-Whisper 模型托管在 HuggingFace，国内访问可能较慢或失败。
-
-### 解决方案 1：使用中国镜像（推荐）
-
-```powershell
-# 自动选择最快镜像
-.\process_video.ps1 -Video "video.mp4" -Mirror auto
-
-# 指定镜像
-.\process_video.ps1 -Video "video.mp4" -Mirror tsinghua  # 清华大学
-.\process_video.ps1 -Video "video.mp4" -Mirror aliyun     # 阿里云
-.\process_video.ps1 -Video "video.mp4" -Mirror ustc       # 中科大
-```
-
-### 解决方案 2：使用代理
-
-```powershell
-# 使用本地代理
-.\process_video.ps1 -Video "video.mp4" -Proxy "http://127.0.0.1:6666"
-
-# 代理+镜像组合
-.\process_video.ps1 -Video "video.mp4" -Proxy "http://127.0.0.1:6666" -Mirror none
-```
-
-### 解决方案 3：手动下载模型
-
-```powershell
-# 模型下载地址
-# https://huggingface.co/ggerganov/whisper/tree/main
-
-# 设置缓存目录
-$env:HUGGINGFACE_HUB_CACHE = "$env:USERPROFILE\.cache\huggingface"
-```
-
----
-
 ## 依赖安装
 
 ### 自动安装
 
-首次运行脚本会自动检查并提示安装缺失的依赖。
+首次运行脚本会自动检查并提示安装缺失的依赖。**国内用户请加 `-Mirror tsinghua` 参数！**
+
+```powershell
+# 国内用户（推荐）
+.\process_video.ps1 -Video "video.mp4" -Mirror tsinghua
+
+# 自动检测镜像
+.\process_video.ps1 -Video "video.mp4" -Mirror auto
+```
 
 ### 手动安装
 
@@ -151,17 +163,17 @@ brew install ffmpeg
 sudo apt install ffmpeg
 ```
 
-#### 2. Python + Whisper
+#### 2. Python + Whisper（国内用户）
 
 ```powershell
-# 安装 whisper
-pip install openai-whisper
-
-# 使用镜像安装
+# 使用清华镜像安装
 pip install openai-whisper -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-# 使用代理安装
-pip install openai-whisper --proxy http://127.0.0.1:6666
+# 或使用阿里云镜像
+pip install openai-whisper -i https://mirrors.aliyun.com/pypi/simple
+
+# 设置 HuggingFace 镜像（模型下载）
+$env:HF_ENDPOINT = "https://hf-mirror.com"
 ```
 
 #### 3. 虚拟环境（推荐）
@@ -170,9 +182,9 @@ pip install openai-whisper --proxy http://127.0.0.1:6666
 # 创建虚拟环境
 python -m venv whisper_env
 
-# 激活并安装
+# 激活并安装（使用镜像）
 .\whisper_env\Scripts\Activate
-pip install openai-whisper
+pip install openai-whisper -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
 ---
@@ -211,6 +223,27 @@ video_learn/
 
 ## 故障排除
 
+### pip 安装超时
+
+```powershell
+# 使用镜像
+pip install openai-whisper -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn
+
+# 或使用代理
+pip install openai-whisper --proxy http://127.0.0.1:7890
+```
+
+### 模型下载失败
+
+```powershell
+# 设置 HuggingFace 镜像
+$env:HF_ENDPOINT = "https://hf-mirror.com"
+
+# 或手动下载模型放到缓存目录
+# 模型下载地址：https://hf-mirror.com/ggerganov/whisper
+# 缓存目录：%USERPROFILE%\.cache\huggingface\hub\
+```
+
 ### ffmpeg 未找到
 
 ```powershell
@@ -227,24 +260,9 @@ $env:PATH += ";C:\path\to\ffmpeg\bin"
 # 检查
 python -c "import whisper"
 
-# 重新安装
+# 重新安装（使用镜像）
 pip uninstall openai-whisper -y
-pip install openai-whisper
-```
-
-### 模型下载失败
-
-1. 尝试使用镜像：` -Mirror tsinghua`
-2. 使用代理：` -Proxy "http://127.0.0.1:6666"`
-3. 手动下载模型后放到缓存目录
-
-### Windows 安全策略拦截
-
-```powershell
-# 使用虚拟环境
-python -m venv whisper_env
-.\whisper_env\Scripts\Activate
-pip install openai-whisper
+pip install openai-whisper -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
 ---
@@ -253,5 +271,9 @@ pip install openai-whisper
 
 1. **分帧密度**：5秒一帧适合<30分钟视频；30秒一帧适合长视频
 2. **内存占用**：Whisper 大模型需要较多内存，建议 CPU 使用 small 模型
-3. **网络问题**：国内用户建议使用 `-Mirror auto` 或 `-Mirror tsinghua`
+3. **网络问题**：国内用户**强烈建议**使用 `-Mirror tsinghua` 或 `-Mirror aliyun`
 4. **虚拟环境**：推荐使用虚拟环境避免依赖冲突
+
+---
+
+*更新: 2026-04-23 - 添加国内镜像源支持*

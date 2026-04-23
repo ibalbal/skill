@@ -27,7 +27,7 @@ import torch
 warnings.filterwarnings('ignore', category=UserWarning)
 
 def setup_mirror():
-    """Setup Chinese mirror for model download"""
+    """Setup Chinese mirror for model download with fallback"""
     # Check if HF_ENDPOINT is already set
     hf_endpoint = os.environ.get('HF_ENDPOINT')
 
@@ -35,10 +35,33 @@ def setup_mirror():
         print(f"Using HF endpoint: {hf_endpoint}")
         return
 
-    # Try to detect if we're in China (simplified check)
-    # Actually, just set the mirror - it will fallback if not reachable
+    # 中国镜像列表 (按推荐顺序)
+    mirrors = [
+        ('https://hf-mirror.com', 'HF-Mirror'),
+        ('https://huggingface.co', 'HuggingFace Official'),
+    ]
+
+    # 尝试检测最快的镜像
+    import urllib.request
+    import socket
+    socket.setdefaulttimeout(5)
+
+    for url, name in mirrors:
+        try:
+            # 尝试访问镜像根目录
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            response = urllib.request.urlopen(req, timeout=5)
+            if response.status in [200, 301, 302, 403, 404]:
+                os.environ['HF_ENDPOINT'] = url
+                print(f"Using {name}: {url}")
+                return
+        except Exception:
+            # 尝试下一个镜像
+            continue
+
+    # 默认使用 hf-mirror.com（即使检测失败也尝试使用）
     os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
-    print("Using HF Mirror: https://hf-mirror.com")
+    print("Using HF-Mirror (default): https://hf-mirror.com")
 
 def get_model_dir():
     """Get model cache directory"""
